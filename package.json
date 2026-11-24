@@ -2,11 +2,12 @@
   "name": "storm-royale",
   "version": "1.0.0",
   "private": true,
-  "description": "Top-down Battle Royale mit Multiplayer und Bots",
+  "description": "First-Person Battle Royale im Browser mit Multiplayer und Bots",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "update": "bash update.sh"
+    "update": "bash update.sh",
+    "test": "node test/walls.test.js"
   },
   "dependencies": {
     "three": "^0.160.0",

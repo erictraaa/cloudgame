@@ -1,67 +1,60 @@
 'use strict';
-// Storm Royale – Server (3D-Welt, 2D-Physik auf der Bodenebene).
-// Koordinaten: x/y = Bodenebene, h = Höhe. Blickrichtung: yaw (a) und pitch (pt).
+// Storm Royale – Server. Simuliert die Welt autoritativ.
+// Koordinaten: x/y = Bodenebene, Höhe getrennt (Gelände + Augenhöhe).
+// Schüsse sind Hitscan: ein exakter Strahltest gegen Wände, Dächer, Bäume, Felsen,
+// Gelände und Spieler – durch Wände schießen ist damit nicht möglich.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { WebSocketServer } = require('ws');
+const { generateWorld } = require('./world.js');
 
 const PORT = process.env.PORT || 3000;
-const MAP = 4000;
-const CX = 2000, CY = 2000;
+const SEED = Number(process.env.SEED) || Math.floor(Math.random() * 1e9);
 const TICK_HZ = 30;
 const SNAP_HZ = 15;
-const MAX_TOTAL = 24;          // Spieler + Bots
+const MAX_TOTAL = 40;          // Spieler + Bots
 const PLAYER_R = 18;
 const PLAYER_H = 72;
-const EYE = 62;                // Augenhöhe
-const SPEED = 260;
-const PICK_R = 30;
-const CHEST_R = 70;            // Reichweite zum Öffnen einer Truhe
+const EYE = 62;
+const SPEED = 300;
+const SPRINT = 1.55;
+const MAX_SLOPE = 1.1;         // steiler bergauf geht nicht (Klippen)
+const PICK_R = 32;
+const CHEST_R = 80;
 const MEDKIT_HEAL = 50;
 const SHIELD_MAX = 50;
 const RESTART_DELAY = 8000;
-const WALL_H = 130, WALL_T = 8, DOOR_W = 40;
-const ZONE_START = 2800;
+const ZONE_START = 8500;
 const ZONE_PHASES = [
-  { hold: 40, shrink: 30, to: 1400, dps: 3 },
-  { hold: 30, shrink: 25, to: 700,  dps: 6 },
-  { hold: 25, shrink: 20, to: 300,  dps: 10 },
-  { hold: 20, shrink: 15, to: 40,   dps: 16 },
+  { hold: 60, shrink: 50, to: 5000, dps: 2 },
+  { hold: 50, shrink: 40, to: 2600, dps: 4 },
+  { hold: 40, shrink: 35, to: 1300, dps: 7 },
+  { hold: 35, shrink: 30, to: 600,  dps: 10 },
+  { hold: 30, shrink: 25, to: 250,  dps: 14 },
+  { hold: 25, shrink: 20, to: 40,   dps: 20 },
 ];
 
 const WEAPONS = {
-  pistol:  { dmg: 14, cd: 0.28, speed: 900,  range: 700,  spread: 0.03,  pellets: 1, ammo: 0 },
-  smg:     { dmg: 8,  cd: 0.07, speed: 1000, range: 600,  spread: 0.09,  pellets: 1, ammo: 45 },
-  rifle:   { dmg: 11, cd: 0.10, speed: 1100, range: 900,  spread: 0.06,  pellets: 1, ammo: 30 },
-  shotgun: { dmg: 9,  cd: 0.70, speed: 800,  range: 380,  spread: 0.22,  pellets: 6, ammo: 8 },
-  sniper:  { dmg: 70, cd: 1.20, speed: 1800, range: 1400, spread: 0.005, pellets: 1, ammo: 5 },
+  pistol:  { dmg: 14, cd: 0.28, range: 900,  spread: 0.02,  pellets: 1, ammo: 0 },
+  smg:     { dmg: 8,  cd: 0.07, range: 700,  spread: 0.06,  pellets: 1, ammo: 45 },
+  rifle:   { dmg: 12, cd: 0.10, range: 1600, spread: 0.03,  pellets: 1, ammo: 30 },
+  shotgun: { dmg: 9,  cd: 0.70, range: 420,  spread: 0.16,  pellets: 7, ammo: 8 },
+  sniper:  { dmg: 75, cd: 1.20, range: 4000, spread: 0.002, pellets: 1, ammo: 5 },
 };
-
-// Benannte Orte auf der Karte (Mitte, Radius, Anzahl Häuser)
-const POIS = [
-  { name: 'Stadt',         x: 2000, y: 2000, r: 380, houses: 14 },
-  { name: 'Leuchtturm',    x: 420,  y: 420,  r: 200, houses: 3 },
-  { name: 'Fabrik',        x: 3200, y: 700,  r: 260, houses: 6 },
-  { name: 'Dorf Nord',     x: 1900, y: 3300, r: 300, houses: 8 },
-  { name: 'Farm',          x: 700,  y: 2600, r: 240, houses: 5 },
-  { name: 'Hafenviertel',  x: 3300, y: 3200, r: 240, houses: 6 },
-  { name: 'Wald-Lichtung', x: 600,  y: 1200, r: 180, houses: 2 },
-  { name: 'Bergdorf',      x: 3000, y: 1800, r: 220, houses: 5 },
-];
 
 const PALETTE = ['#ff6b6b', '#4dabf7', '#51cf66', '#fcc419', '#cc5de8',
                  '#ff922b', '#20c997', '#f06595', '#94d82d', '#748ffc'];
-const BOT_NAMES = ['Fuchs', 'Wolf', 'Pixel', 'Blitz', 'Nova', 'Rex', 'Luna', 'Kira',
-                   'Otto', 'Max', 'Ninja', 'Ghost', 'Viper', 'Taco', 'Mika', 'Zed',
-                   'Ruby', 'Jet', 'Echo', 'Kai', 'Bruno', 'Yuki', 'Hugo', 'Lia'];
+const BOT_NAMES = ['Fuchs', 'Wolf', 'Pixel', 'Blitz', 'Nova', 'Rex', 'Luna', 'Kira', 'Otto', 'Max',
+                   'Ninja', 'Ghost', 'Viper', 'Taco', 'Mika', 'Zed', 'Ruby', 'Jet', 'Echo', 'Kai',
+                   'Bruno', 'Yuki', 'Hugo', 'Lia', 'Finn', 'Mats', 'Ida', 'Juna', 'Paul', 'Emil',
+                   'Rosa', 'Theo', 'Nele', 'Ben', 'Mila', 'Oskar', 'Lotta', 'Anton', 'Frieda', 'Karl'];
 
-// Bot-Stärke: wirkt auf alle Bots sofort
 const BOT_LEVELS = {
-  easy:   { aim: 0.45, think: [0.6, 1.0],  engage: 420, fire: 0.5 },
-  medium: { aim: 0.24, think: [0.25, 0.5], engage: 650, fire: 1 },
-  hard:   { aim: 0.07, think: [0.12, 0.2], engage: 850, fire: 1 },
+  easy:   { aim: 0.40, think: [0.6, 1.0],  engage: 500,  fire: 0.5 },
+  medium: { aim: 0.20, think: [0.25, 0.5], engage: 800,  fire: 0.9 },
+  hard:   { aim: 0.06, think: [0.12, 0.2], engage: 1100, fire: 1 },
 };
 let botLevel = 'medium';
 function setDiff(v) { if (BOT_LEVELS[v]) botLevel = v; }
@@ -73,15 +66,189 @@ const rand = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
 
+// ---------- Welt ----------
+console.log(`Erzeuge Welt (Seed ${SEED}) …`);
+const world = generateWorld(SEED);
+const MAP = world.MAP;
+const groundAt = world.heightAt;
+
+// Solids: Kreise (Baumstämme, Felsen) und Quader (Wände, Dächer, Türme)
+// jeweils mit Höhenbereich h0..h1
+const solids = [];
+const GC = 250, GN = Math.ceil(MAP / GC);
+const grid = Array.from({ length: GN * GN }, () => []);
+
+function addSolid(s) {
+  const id = solids.length;
+  solids.push(s);
+  const x0 = s.t === 'c' ? s.x - s.r : s.minX, x1 = s.t === 'c' ? s.x + s.r : s.maxX;
+  const y0 = s.t === 'c' ? s.y - s.r : s.minY, y1 = s.t === 'c' ? s.y + s.r : s.maxY;
+  for (let cy = clamp(Math.floor(y0 / GC), 0, GN - 1); cy <= clamp(Math.floor(y1 / GC), 0, GN - 1); cy++) {
+    for (let cx = clamp(Math.floor(x0 / GC), 0, GN - 1); cx <= clamp(Math.floor(x1 / GC), 0, GN - 1); cx++) {
+      grid[cy * GN + cx].push(id);
+    }
+  }
+}
+
+for (const b of world.buildings) {
+  for (const [minX, maxX, minY, maxY] of b.walls) addSolid({ t: 'b', minX, maxX, minY, maxY, h0: b.g - 20, h1: b.g + b.wh });
+  // Dach als Kugelfang (Spieler kommen nicht so hoch)
+  if (b.type !== 'tower') {
+    const rh = b.roof === 'gable' ? Math.min(b.x1 - b.x0, b.y1 - b.y0) * 0.38 : 8;
+    addSolid({ t: 'b', minX: b.x0, maxX: b.x1, minY: b.y0, maxY: b.y1, h0: b.g + b.wh, h1: b.g + b.wh + rh });
+  }
+}
+for (const [x, y, s] of world.trees) {
+  const g = groundAt(x, y);
+  addSolid({ t: 'c', x, y, r: 9 * s, h0: g - 10, h1: g + 130 * s });
+}
+for (const [x, y, r] of world.rocks) {
+  const g = groundAt(x, y);
+  addSolid({ t: 'c', x, y, r: r * 0.85, h0: g - 20, h1: g + r * 0.8 });
+}
+const seen = new Uint32Array(solids.length);
+let stamp = 0;
+
+function forSolidsInRect(x0, y0, x1, y1, fn) {
+  stamp++;
+  const cx0 = clamp(Math.floor(x0 / GC), 0, GN - 1), cx1 = clamp(Math.floor(x1 / GC), 0, GN - 1);
+  const cy0 = clamp(Math.floor(y0 / GC), 0, GN - 1), cy1 = clamp(Math.floor(y1 / GC), 0, GN - 1);
+  for (let cy = cy0; cy <= cy1; cy++) {
+    for (let cx = cx0; cx <= cx1; cx++) {
+      for (const id of grid[cy * GN + cx]) {
+        if (seen[id] === stamp) continue;
+        seen[id] = stamp;
+        fn(solids[id]);
+      }
+    }
+  }
+}
+
+// blockiert ein Solid einen Kreis (r) auf Höhe g..g+PLAYER_H?
+function blockedAt(x, y, r) {
+  const g = groundAt(x, y);
+  let hit = false;
+  forSolidsInRect(x - r, y - r, x + r, y + r, s => {
+    if (hit || s.h1 < g + 2 || s.h0 > g + PLAYER_H) return;
+    if (s.t === 'c') hit = dist(x, y, s.x, s.y) < s.r + r;
+    else hit = dist(x, y, clamp(x, s.minX, s.maxX), clamp(y, s.minY, s.maxY)) < r;
+  });
+  return hit;
+}
+
+function slopeAt(x, y) {
+  return Math.max(Math.abs(groundAt(x + 30, y) - groundAt(x - 30, y)),
+                  Math.abs(groundAt(x, y + 30) - groundAt(x, y - 30))) / 60;
+}
+
+// ---------- Strahltests ----------
+function rayBox(ox, oy, oh, dx, dy, dh, s, maxT) {
+  let t0 = 0, t1 = maxT;
+  const axes = [[ox, dx, s.minX, s.maxX], [oy, dy, s.minY, s.maxY], [oh, dh, s.h0, s.h1]];
+  for (const [o, d, mn, mx] of axes) {
+    if (Math.abs(d) < 1e-9) {
+      if (o < mn || o > mx) return -1;
+    } else {
+      let a = (mn - o) / d, b = (mx - o) / d;
+      if (a > b) { const tmp = a; a = b; b = tmp; }
+      if (a > t0) t0 = a;
+      if (b < t1) t1 = b;
+      if (t0 > t1) return -1;
+    }
+  }
+  return t0;
+}
+
+function rayCyl(ox, oy, oh, dx, dy, dh, cx, cy, r, h0, h1, maxT) {
+  const fx = ox - cx, fy = oy - cy;
+  const a = dx * dx + dy * dy;
+  let best = -1;
+  if (a > 1e-12) {
+    const b = 2 * (fx * dx + fy * dy), c = fx * fx + fy * fy - r * r;
+    const disc = b * b - 4 * a * c;
+    if (disc >= 0) {
+      const t = (-b - Math.sqrt(disc)) / (2 * a);
+      if (t >= 0 && t <= maxT) {
+        const h = oh + dh * t;
+        if (h >= h0 && h <= h1) best = t;
+      }
+    }
+  }
+  // Treffer von oben durch den Deckel (z. B. von einer Klippe herab)
+  if (dh < 0) {
+    const t = (h1 - oh) / dh;
+    if (t >= 0 && t <= maxT && (best < 0 || t < best)) {
+      const x = fx + dx * t, y = fy + dy * t;
+      if (x * x + y * y <= r * r) best = t;
+    }
+  }
+  return best;
+}
+
+// erster Treffer mit Welt (Solids + Gelände), Rückgabe: Distanz oder maxD
+function raycastWorld(ox, oy, oh, dx, dy, dh, maxD) {
+  let best = maxD;
+  // Solids entlang des Strahls (Rasterzellen um Stützpunkte sammeln)
+  stamp++;
+  const step = GC * 0.5;
+  for (let t = 0; t <= maxD + step && t <= best + step; t += step) {
+    const x = ox + dx * Math.min(t, maxD), y = oy + dy * Math.min(t, maxD);
+    const cx = Math.floor(x / GC), cy = Math.floor(y / GC);
+    for (let yy = cy - 1; yy <= cy + 1; yy++) {
+      if (yy < 0 || yy >= GN) continue;
+      for (let xx = cx - 1; xx <= cx + 1; xx++) {
+        if (xx < 0 || xx >= GN) continue;
+        for (const id of grid[yy * GN + xx]) {
+          if (seen[id] === stamp) continue;
+          seen[id] = stamp;
+          const s = solids[id];
+          const ht = s.t === 'b'
+            ? rayBox(ox, oy, oh, dx, dy, dh, s, best)
+            : rayCyl(ox, oy, oh, dx, dy, dh, s.x, s.y, s.r, s.h0, s.h1, best);
+          if (ht >= 0 && ht < best) best = ht;
+        }
+      }
+    }
+  }
+  // Gelände abtasten
+  const ts = 10;
+  for (let t = ts; t <= best; t += ts) {
+    if (oh + dh * t < groundAt(ox + dx * t, oy + dy * t)) {
+      let lo = t - ts, hi = t;
+      for (let k = 0; k < 6; k++) {
+        const m = (lo + hi) / 2;
+        if (oh + dh * m < groundAt(ox + dx * m, oy + dy * m)) hi = m; else lo = m;
+      }
+      best = hi;
+      break;
+    }
+  }
+  return best;
+}
+
+// Strahl gegen Welt und Spieler
+function raycast(ox, oy, oh, dx, dy, dh, maxD, ignoreId) {
+  const wt = raycastWorld(ox, oy, oh, dx, dy, dh, maxD);
+  let best = wt, ent = null, head = false;
+  for (const e of ents.values()) {
+    if (!e.alive || e.id === ignoreId) continue;
+    const t = rayCyl(ox, oy, oh, dx, dy, dh, e.x, e.y, PLAYER_R, e.g, e.g + PLAYER_H, best);
+    if (t >= 0 && t < best) {
+      best = t; ent = e;
+      head = oh + dh * t >= e.g + PLAYER_H - 16;
+    }
+  }
+  const kind = ent ? 2 : (wt < maxD ? 1 : 0);
+  return { t: best, kind, ent, head };
+}
+
 function zoneAt(t) {
   let from = ZONE_START, tt = t;
   for (let i = 0; i < ZONE_PHASES.length; i++) {
     const p = ZONE_PHASES[i];
     if (tt < p.hold) return { r: from, st: 'hold', tm: p.hold - tt, ph: i + 1, dps: p.dps };
     tt -= p.hold;
-    if (tt < p.shrink) {
-      return { r: from + (p.to - from) * (tt / p.shrink), st: 'shrink', tm: p.shrink - tt, ph: i + 1, dps: p.dps };
-    }
+    if (tt < p.shrink) return { r: from + (p.to - from) * (tt / p.shrink), st: 'shrink', tm: p.shrink - tt, ph: i + 1, dps: p.dps };
     tt -= p.shrink;
     from = p.to;
   }
@@ -89,167 +256,101 @@ function zoneAt(t) {
   return { r: last.to, st: 'final', tm: 0, ph: ZONE_PHASES.length, dps: last.dps };
 }
 
-// ---------- Welt: Solids (Kreise = Bäume/Felsen, Boxen = Hauswände) ----------
-let solids = [];
-let chestSpots = [];
-let pickups = [];      // inkl. Truhen (type 'chest')
-let bullets = [];
+// ---------- Spielzustand ----------
+let pickups = [];
+let pkAdd = [], pkDel = [], pkReset = false;
 let events = [];
-let pkDirty = true;
 let matchT = 0;
 let endT = null;
+let zoneC = { x: MAP / 2, y: MAP / 2 };
 let zoneNow = zoneAt(0);
 const ents = new Map();
 let lastTick = Date.now();
 let snapAcc = 0;
 
-function blockedAt(x, y, r) {
-  for (const s of solids) {
-    if (s.t === 'c') {
-      if (dist(x, y, s.x, s.y) < s.r + r) return true;
-    } else {
-      const cx = clamp(x, s.minX, s.maxX), cy = clamp(y, s.minY, s.maxY);
-      if (dist(x, y, cx, cy) < r) return true;
-    }
-  }
-  return false;
+function walkable(x, y) {
+  return x > 300 && y > 300 && x < MAP - 300 && y < MAP - 300 &&
+         groundAt(x, y) < 1400 && slopeAt(x, y) < 0.8 && !blockedAt(x, y, PLAYER_R + 2);
 }
 
-function boxOverlaps(b, margin) {
-  for (const s of solids) {
-    if (s.t === 'b') {
-      if (b.minX < s.maxX + margin && b.maxX > s.minX - margin &&
-          b.minY < s.maxY + margin && b.maxY > s.minY - margin) return true;
-    } else {
-      const cx = clamp(s.x, b.minX, b.maxX), cy = clamp(s.y, b.minY, b.maxY);
-      if (dist(s.x, s.y, cx, cy) < s.r + margin) return true;
-    }
+function randomWalkable(cx, cy, radius) {
+  for (let i = 0; i < 200; i++) {
+    const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * radius;
+    const x = cx + Math.cos(a) * d, y = cy + Math.sin(a) * d;
+    if (walkable(x, y)) return { x, y };
   }
-  return false;
+  return { x: cx, y: cy };
 }
 
-function addHouse(b) {
-  const T = WALL_T, H = WALL_H, cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
-  solids.push({ t: 'b', minX: b.minX, maxX: b.maxX, minY: b.minY, maxY: b.minY + T, h: H });   // Nord
-  solids.push({ t: 'b', minX: b.minX, maxX: b.minX + T, minY: b.minY, maxY: b.maxY, h: H });   // West
-  solids.push({ t: 'b', minX: b.maxX - T, maxX: b.maxX, minY: b.minY, maxY: b.maxY, h: H });   // Ost
-  // Süd mit Tür in der Mitte
-  solids.push({ t: 'b', minX: b.minX, maxX: cx - DOOR_W / 2, minY: b.maxY - T, maxY: b.maxY, h: H });
-  solids.push({ t: 'b', minX: cx + DOOR_W / 2, maxX: b.maxX, minY: b.maxY - T, maxY: b.maxY, h: H });
-  if (Math.random() < 0.6) chestSpots.push({ x: cx + rand(-15, 15), y: cy + rand(-10, 10) });
+function pkJson(p) { return { i: p.id, t: p.type, x: Math.round(p.x), y: Math.round(p.y) }; }
+function addPickup(type, x, y, ammo) {
+  const p = { id: nid(), type, x, y, ammo: ammo ?? (WEAPONS[type] ? WEAPONS[type].ammo : 0) };
+  pickups.push(p);
+  pkAdd.push(p);
+  return p;
+}
+function removePickup(p) {
+  if (p.dead) return;
+  p.dead = true;
+  pkDel.push(p.id);
 }
 
-function genWorld() {
-  solids = [];
-  chestSpots = [];
-  // Häuser in den Orten
-  for (const poi of POIS) {
-    let placed = 0;
-    for (let t = 0; t < poi.houses * 80 && placed < poi.houses; t++) {
-      const a = Math.random() * Math.PI * 2;
-      const d = Math.sqrt(Math.random()) * poi.r;
-      const cx = poi.x + Math.cos(a) * d, cy = poi.y + Math.sin(a) * d;
-      const w = rand(70, 100), h = rand(55, 80);
-      const b = { minX: cx - w / 2, maxX: cx + w / 2, minY: cy - h / 2, maxY: cy + h / 2 };
-      if (b.minX < 60 || b.maxX > MAP - 60 || b.minY < 60 || b.maxY > MAP - 60) continue;
-      if (boxOverlaps(b, 24)) continue;
-      addHouse(b);
-      placed++;
-    }
-  }
-  // Bäume und Felsen, verstreut
-  let trees = 0;
-  for (let t = 0; t < 3000 && trees < 520; t++) {
-    const x = rand(40, MAP - 40), y = rand(40, MAP - 40);
-    const rock = Math.random() < 0.25;
-    const r = rock ? rand(16, 28) : rand(20, 32);
-    if (dist(x, y, CX, CY) < 120) continue;
-    if (blockedAt(x, y, r + 14)) continue;
-    solids.push({ t: 'c', x, y, r, h: rock ? 40 : 110 });
-    trees++;
-  }
-  // Zusätzliche Truhen draußen
-  for (let i = 0; i < 16; i++) {
-    const p = randomFree(20, 2200);
-    chestSpots.push(p);
-  }
-}
+const LOOT = ['medkit', 'medkit', 'shield', 'smg', 'smg', 'rifle', 'rifle', 'shotgun', 'sniper'];
+const randLoot = () => LOOT[Math.floor(Math.random() * LOOT.length)];
 
-// freier Punkt im Kreis um die Mitte
-function randomFree(r, radius) {
-  for (let i = 0; i < 300; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const d = Math.sqrt(Math.random()) * radius;
-    const x = clamp(CX + Math.cos(a) * d, r, MAP - r);
-    const y = clamp(CY + Math.sin(a) * d, r, MAP - r);
-    if (!blockedAt(x, y, r)) return { x, y };
-  }
-  return { x: CX, y: CY };
-}
-
-function inSolid(x, y, h) {
-  for (const s of solids) {
-    if (h >= s.h) continue;
-    if (s.t === 'c') {
-      if (dist(x, y, s.x, s.y) < s.r) return true;
-    } else if (x >= s.minX && x <= s.maxX && y >= s.minY && y <= s.maxY) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Pickups: Raster über die ganze Karte, pro Zelle genau ein Pickup
 function genPickups() {
   pickups = [];
-  const pool = ['medkit', 'medkit', 'shield', 'smg', 'smg', 'rifle', 'rifle', 'shotgun', 'sniper'];
-  const N = 12, margin = 200, cell = (MAP - 2 * margin) / N;
+  pkAdd = []; pkDel = [];
+  // draußen: gleichmäßiges Raster über die ganze Karte
+  const N = 24, cell = MAP / N;
   for (let gy = 0; gy < N; gy++) {
     for (let gx = 0; gx < N; gx++) {
-      let p = null;
-      for (let t = 0; t < 40 && !p; t++) {
-        const x = margin + (gx + Math.random()) * cell;
-        const y = margin + (gy + Math.random()) * cell;
-        if (!blockedAt(x, y, 12)) p = { x, y };
+      for (let t = 0; t < 12; t++) {
+        const x = (gx + Math.random()) * cell, y = (gy + Math.random()) * cell;
+        if (!walkable(x, y)) continue;
+        addPickup(randLoot(), x, y);
+        break;
       }
-      if (!p) continue;
-      const type = pool[Math.floor(Math.random() * pool.length)];
-      pickups.push({ id: nid(), type, x: p.x, y: p.y, ammo: WEAPONS[type] ? WEAPONS[type].ammo : 0 });
     }
   }
-  // Truhen (in Häusern und draußen)
-  for (const c of chestSpots) {
-    pickups.push({ id: nid(), type: 'chest', x: c.x, y: c.y, ammo: 0 });
+  // in Gebäuden: Beute und Truhen
+  for (const b of world.buildings) {
+    if (b.type === 'tower') continue;
+    const n = b.type === 'apartment' || b.type === 'warehouse' ? 3 : 1 + (Math.random() < 0.5 ? 1 : 0);
+    const chests = b.type === 'warehouse' ? 2 : (Math.random() < 0.45 ? 1 : 0);
+    const spots = [];
+    for (let t = 0; t < 40 && spots.length < n + chests; t++) {
+      const x = rand(b.x0 + 30, b.x1 - 30), y = rand(b.y0 + 30, b.y1 - 30);
+      if (blockedAt(x, y, 16) || spots.some(s => dist(s.x, s.y, x, y) < 40)) continue;
+      spots.push({ x, y });
+    }
+    spots.forEach((s, i) => addPickup(i < chests ? 'chest' : randLoot(), s.x, s.y));
   }
-  pkDirty = true;
+  // ein paar Truhen in der Wildnis
+  for (let i = 0; i < 40; i++) {
+    const p = randomWalkable(MAP / 2, MAP / 2, MAP * 0.48);
+    addPickup('chest', p.x, p.y);
+  }
+  pkReset = true;
 }
 
-function pkList() {
-  return pickups.map(p => ({ i: p.id, t: p.type, x: Math.round(p.x), y: Math.round(p.y) }));
-}
-
-// Spawn: von 30 Kandidaten im Zonenbereich den nehmen, der am weitesten
-// von allen lebenden Spielern entfernt ist.
+// Spawn: Kandidat mit größtem Abstand zu anderen Spielern, innerhalb der Zone
 function spawnPoint(e) {
   const others = [...ents.values()].filter(o => o !== e && o.alive);
-  const rad = Math.max(200, zoneNow.r * 0.85);
   let best = null, bestD = -1;
   for (let i = 0; i < 30; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const d = Math.sqrt(Math.random()) * rad;
-    const x = CX + Math.cos(a) * d, y = CY + Math.sin(a) * d;
-    if (x < PLAYER_R || x > MAP - PLAYER_R || y < PLAYER_R || y > MAP - PLAYER_R) continue;
-    if (blockedAt(x, y, PLAYER_R)) continue;
+    const p = randomWalkable(zoneC.x, zoneC.y, Math.min(zoneNow.r * 0.85, MAP * 0.45));
     let md = Infinity;
-    for (const o of others) md = Math.min(md, dist(x, y, o.x, o.y));
-    if (md > bestD) { bestD = md; best = { x, y }; }
+    for (const o of others) md = Math.min(md, dist(p.x, p.y, o.x, o.y));
+    if (md > bestD) { bestD = md; best = p; }
   }
-  return best || randomFree(PLAYER_R, 1400);
+  return best;
 }
 
 function resolve(e) {
   for (let it = 0; it < 2; it++) {
-    for (const s of solids) {
+    forSolidsInRect(e.x - PLAYER_R - 2, e.y - PLAYER_R - 2, e.x + PLAYER_R + 2, e.y + PLAYER_R + 2, s => {
+      if (s.h1 < e.g + 2 || s.h0 > e.g + PLAYER_H) return;
       if (s.t === 'c') {
         const dx = e.x - s.x, dy = e.y - s.y, d = Math.hypot(dx, dy), min = s.r + PLAYER_R;
         if (d < min) {
@@ -264,39 +365,46 @@ function resolve(e) {
             const k = (PLAYER_R - d) / d;
             e.x += dx * k; e.y += dy * k;
           } else {
-            // im Quader: an der nächsten Seite herausschieben
-            const left = e.x - s.minX, right = s.maxX - e.x, down = e.y - s.minY, up = s.maxY - e.y;
-            const m = Math.min(left, right, down, up);
-            if (m === left) e.x = s.minX - PLAYER_R;
-            else if (m === right) e.x = s.maxX + PLAYER_R;
-            else if (m === down) e.y = s.minY - PLAYER_R;
+            const l = e.x - s.minX, r = s.maxX - e.x, dn = e.y - s.minY, up = s.maxY - e.y;
+            const m = Math.min(l, r, dn, up);
+            if (m === l) e.x = s.minX - PLAYER_R;
+            else if (m === r) e.x = s.maxX + PLAYER_R;
+            else if (m === dn) e.y = s.minY - PLAYER_R;
             else e.y = s.maxY + PLAYER_R;
           }
         }
       }
-    }
+    });
   }
   e.x = clamp(e.x, PLAYER_R, MAP - PLAYER_R);
   e.y = clamp(e.y, PLAYER_R, MAP - PLAYER_R);
+  e.g = groundAt(e.x, e.y);
+}
+
+// Schritt auf dem Gelände: zu steil bergauf (Klippe) ist blockiert
+function moveEntity(e, mx, my) {
+  const tryMove = (dx, dy) => {
+    const d = Math.hypot(dx, dy);
+    if (d < 1e-6) return true;
+    const nx = clamp(e.x + dx, PLAYER_R, MAP - PLAYER_R), ny = clamp(e.y + dy, PLAYER_R, MAP - PLAYER_R);
+    const g1 = groundAt(nx, ny);
+    if (g1 - e.g > d * MAX_SLOPE + 1) return false;
+    e.x = nx; e.y = ny; e.g = g1;
+    return true;
+  };
+  if (!tryMove(mx, my)) { if (!tryMove(mx, 0)) tryMove(0, my); }
+  resolve(e);
 }
 
 // ---------- Entities ----------
 function resetEntity(e) {
   const p = spawnPoint(e);
-  e.x = p.x; e.y = p.y;
-  e.ang = Math.atan2(CY - e.y, CX - e.x);
-  e.hp = 100;
-  e.shield = 0;
-  e.alive = true;
-  e.kills = 0;
-  e.weapon = 'pistol';
-  e.ammo = Infinity;
-  e.cd = 0;
-  e.input = { mx: 0, my: 0, ang: e.ang, pitch: 0, shoot: false, use: false };
-  e.mode = 'wander';
-  e.goal = null;
-  e.target = null;
-  e.think = 0;
+  e.x = p.x; e.y = p.y; e.g = groundAt(e.x, e.y);
+  e.ang = Math.atan2(zoneC.y - e.y, zoneC.x - e.x);
+  e.hp = 100; e.shield = 0; e.alive = true; e.kills = 0;
+  e.weapon = 'pistol'; e.ammo = Infinity; e.cd = 0;
+  e.input = { mx: 0, my: 0, ang: e.ang, pitch: 0, shoot: false, use: false, sprint: false };
+  e.mode = 'wander'; e.goal = null; e.target = null; e.think = Math.random() * 0.5;
   e.px = e.x; e.py = e.y;
 }
 
@@ -317,11 +425,7 @@ function addBot() {
   const name = pool.length ? pool[Math.floor(Math.random() * pool.length)] : 'Bot' + nid();
   return makeEntity(name, true);
 }
-
-function fillBots() {
-  while (ents.size < MAX_TOTAL) addBot();
-}
-
+function fillBots() { while (ents.size < MAX_TOTAL) addBot(); }
 function removeOneBot() {
   let victim = null;
   for (const e of ents.values()) {
@@ -336,21 +440,24 @@ function nearestPickup(e, pred, maxd) {
   let best = null, bd = maxd;
   for (const p of pickups) {
     if (p.dead || !pred(p)) continue;
-    const d = dist(e.x, e.y, p.x, p.y);
-    if (d < bd) { bd = d; best = p; }
+    const d = Math.abs(p.x - e.x) + Math.abs(p.y - e.y);
+    if (d > bd * 1.5) continue;
+    const dd = dist(e.x, e.y, p.x, p.y);
+    if (dd < bd) { bd = dd; best = p; }
   }
   return best;
 }
 
 function dropWeapon(e) {
   if (e.weapon === 'pistol' || !(e.ammo > 0)) return;
-  pickups.push({ id: nid(), type: e.weapon, x: e.x, y: e.y, ammo: e.ammo, noPick: e.id, noPickUntil: matchT + 2 });
-  pkDirty = true;
+  const p = addPickup(e.weapon, e.x, e.y, e.ammo);
+  p.noPick = e.id; p.noPickUntil = matchT + 2;
 }
 
 function pickupCheck(e) {
-  for (const p of pickups.slice()) {
+  for (const p of pickups) {
     if (p.dead || p.type === 'chest') continue;
+    if (Math.abs(p.x - e.x) > PICK_R || Math.abs(p.y - e.y) > PICK_R) continue;
     if (dist(e.x, e.y, p.x, p.y) > PICK_R) continue;
     if (p.noPick === e.id && matchT < p.noPickUntil) continue;
     if (p.type === 'medkit') {
@@ -366,12 +473,10 @@ function pickupCheck(e) {
       e.weapon = p.type;
       e.ammo = p.ammo;
     }
-    p.dead = true;
-    pkDirty = true;
+    removePickup(p);
   }
 }
 
-// Truhe öffnen: nächste Truhe in Reichweite -> 3 Beute-Items
 function openChest(e) {
   let best = null, bd = CHEST_R;
   for (const p of pickups) {
@@ -380,13 +485,15 @@ function openChest(e) {
     if (d < bd) { bd = d; best = p; }
   }
   if (!best) return;
-  best.dead = true;
-  pkDirty = true;
+  removePickup(best);
   const loot = ['rifle', 'shotgun', 'smg', 'sniper', 'medkit', 'shield', 'smg', 'rifle'];
   for (let k = 0; k < 3; k++) {
-    const type = loot[Math.floor(Math.random() * loot.length)];
-    pickups.push({ id: nid(), type, x: best.x + rand(-25, 25), y: best.y + rand(-25, 25),
-                   ammo: WEAPONS[type] ? WEAPONS[type].ammo : 0 });
+    let x = best.x, y = best.y;
+    for (let t = 0; t < 10; t++) {
+      const cx = best.x + rand(-28, 28), cy = best.y + rand(-28, 28);
+      if (!blockedAt(cx, cy, 10)) { x = cx; y = cy; break; }
+    }
+    addPickup(loot[Math.floor(Math.random() * loot.length)], x, y);
   }
   events.push({ t: 'open', x: Math.round(best.x), y: Math.round(best.y), by: e.id });
 }
@@ -414,94 +521,72 @@ function fire(e) {
     e.ammo -= 1;
     if (e.ammo <= 0) { e.weapon = 'pistol'; e.ammo = Infinity; }
   }
-  const a = e.ang, p = e.input.pitch;
-  const ox = e.x + Math.cos(a) * (PLAYER_R + 4);
-  const oy = e.y + Math.sin(a) * (PLAYER_R + 4);
-  const oh = EYE - 8;
+  const ox = e.x, oy = e.y, oh = e.g + EYE;
+  const ends = [];
   for (let i = 0; i < w.pellets; i++) {
-    const aa = a + (Math.random() - 0.5) * 2 * w.spread;
-    const pp = p + (Math.random() - 0.5) * w.spread * 0.6;
-    const v = w.speed;
-    bullets.push({
-      x: ox, y: oy, h: oh,
-      vx: Math.cos(aa) * Math.cos(pp) * v,
-      vy: Math.sin(aa) * Math.cos(pp) * v,
-      vh: Math.sin(pp) * v,
-      owner: e.id, dmg: w.dmg, life: w.range / w.speed, dead: false,
-    });
-  }
-  events.push({ t: 'shot', x: Math.round(ox), y: Math.round(oy), h: Math.round(oh),
-                a: +a.toFixed(3), p: +p.toFixed(3), n: w.pellets, sp: w.speed, r: w.range, sd: w.spread, o: e.id });
-}
-
-function updateBullets(dt) {
-  for (const b of bullets) {
-    const steps = 3;
-    for (let s = 0; s < steps && !b.dead; s++) {
-      b.x += b.vx * dt / steps;
-      b.y += b.vy * dt / steps;
-      b.h += b.vh * dt / steps;
-      if (b.x < 0 || b.y < 0 || b.x > MAP || b.y > MAP || b.h < 0 || b.h > 400 || inSolid(b.x, b.y, b.h)) {
-        b.dead = true;
-        break;
-      }
-      for (const e of ents.values()) {
-        if (!e.alive || e.id === b.owner) continue;
-        if (dist(e.x, e.y, b.x, b.y) < PLAYER_R && b.h <= PLAYER_H) {
-          const headshot = b.h >= PLAYER_H - 16;
-          const dmg = headshot ? b.dmg * 2 : b.dmg;
-          events.push({ t: 'hit', x: Math.round(b.x), y: Math.round(b.y), h: Math.round(b.h),
-                        v: e.id, s: b.owner, hd: headshot });
-          hurt(e, dmg, ents.get(b.owner) || null, 'Unbekannt');
-          b.dead = true;
-          break;
-        }
-      }
+    const aa = e.ang + (Math.random() - 0.5) * 2 * w.spread;
+    const pp = e.input.pitch + (Math.random() - 0.5) * 2 * w.spread * 0.6;
+    const cp = Math.cos(pp);
+    const dx = Math.cos(aa) * cp, dy = Math.sin(aa) * cp, dh = Math.sin(pp);
+    const r = raycast(ox, oy, oh, dx, dy, dh, w.range, e.id);
+    const ex = ox + dx * r.t, ey = oy + dy * r.t, eh = oh + dh * r.t;
+    if (r.kind === 2) {
+      events.push({ t: 'hit', x: Math.round(ex), y: Math.round(ey), h: Math.round(eh), v: r.ent.id, s: e.id, hd: r.head });
+      hurt(r.ent, r.head ? w.dmg * 2 : w.dmg, e, 'Unbekannt');
     }
-    b.life -= dt;
-    if (b.life <= 0) b.dead = true;
+    ends.push([Math.round(ex), Math.round(ey), Math.round(eh), r.kind]);
   }
-  bullets = bullets.filter(b => !b.dead);
+  events.push({ t: 'shot', o: e.id, x: Math.round(ox), y: Math.round(oy), h: Math.round(oh), e: ends });
 }
 
 // ---------- Bot-KI ----------
-function randomInZone() {
-  return randomFree(40, Math.max(100, zoneNow.r - 80));
+function hasLOS(e, t) {
+  const oh = e.g + EYE, th = t.g + 45;
+  const dx = t.x - e.x, dy = t.y - e.y, dh = th - oh;
+  const d = Math.hypot(dx, dy, dh);
+  if (d < 1) return true;
+  return raycastWorld(e.x, e.y, oh, dx / d, dy / d, dh / d, d) >= d - 1;
 }
 
 function botThink(e, dt) {
   e.think -= dt;
+  const L = BOT_LEVELS[botLevel];
   if (e.think <= 0) {
-    const L = BOT_LEVELS[botLevel];
     e.think = L.think[0] + Math.random() * (L.think[1] - L.think[0]);
     e.aimOff = (Math.random() - 0.5) * L.aim;
 
-    let target = null, bd = Infinity;
+    // nächster sichtbarer Gegner
+    const cands = [];
     for (const o of ents.values()) {
       if (o === e || !o.alive) continue;
       const d = dist(e.x, e.y, o.x, o.y);
-      if (d < bd) { bd = d; target = o; }
+      if (d < L.engage) cands.push([d, o]);
     }
+    cands.sort((a, b) => a[0] - b[0]);
+    let target = null;
+    for (const [, o] of cands.slice(0, 3)) { if (hasLOS(e, o)) { target = o; break; } }
 
     let g;
-    const inZone = dist(e.x, e.y, CX, CY) < zoneNow.r - 60;
-    const stuck = dist(e.x, e.y, e.px, e.py) < 12 && e.mode !== 'fight';
+    const inZone = dist(e.x, e.y, zoneC.x, zoneC.y) < zoneNow.r - 100;
+    const stuck = dist(e.x, e.y, e.px, e.py) < 15 && e.mode !== 'fight';
     e.px = e.x; e.py = e.y;
 
-    if (!inZone) {
-      e.mode = 'zone'; e.goal = { x: CX, y: CY }; e.target = null;
-    } else if (target && bd < L.engage) {
+    if (!inZone && !stuck) {
+      e.mode = 'zone'; e.goal = { x: zoneC.x, y: zoneC.y }; e.target = null;
+    } else if (target) {
       e.mode = 'fight'; e.target = target; e.goal = null;
-    } else if (e.hp < 55 && (g = nearestPickup(e, p => p.type === 'medkit', 1000))) {
+    } else if (e.hp < 55 && (g = nearestPickup(e, p => p.type === 'medkit', 900))) {
       e.mode = 'loot'; e.goal = g; e.target = null;
-    } else if (e.shield < 20 && (g = nearestPickup(e, p => p.type === 'shield', 800))) {
+    } else if (e.shield < 20 && (g = nearestPickup(e, p => p.type === 'shield', 700))) {
       e.mode = 'loot'; e.goal = g; e.target = null;
-    } else if (e.weapon === 'pistol' && (g = nearestPickup(e, p => p.type === 'chest', 500))) {
+    } else if (e.weapon === 'pistol' && (g = nearestPickup(e, p => p.type === 'chest' || (!!WEAPONS[p.type] && p.type !== 'pistol'), 900))) {
       e.mode = 'loot'; e.goal = g; e.target = null;
-    } else if (e.weapon === 'pistol' && (g = nearestPickup(e, p => !!WEAPONS[p.type] && p.type !== 'pistol', 900))) {
-      e.mode = 'loot'; e.goal = g; e.target = null;
-    } else if (e.mode !== 'wander' || !e.goal || stuck || dist(e.goal.x, e.goal.y, e.x, e.y) < 40) {
-      e.mode = 'wander'; e.goal = randomInZone(); e.target = null;
+    } else if (e.mode !== 'wander' || !e.goal || stuck || dist(e.goal.x, e.goal.y, e.x, e.y) < 50) {
+      e.mode = 'wander'; e.target = null;
+      // Ziel in der Nähe, aber in der Zone
+      const toward = inZone ? { x: e.x, y: e.y } : { x: (e.x + zoneC.x) / 2, y: (e.y + zoneC.y) / 2 };
+      e.goal = randomWalkable(toward.x, toward.y, stuck ? 400 : 1000);
+      if (dist(e.goal.x, e.goal.y, zoneC.x, zoneC.y) > zoneNow.r) e.goal = { x: zoneC.x, y: zoneC.y };
     }
   }
 
@@ -511,27 +596,26 @@ function botThink(e, dt) {
     const dx = t.x - e.x, dy = t.y - e.y;
     const d = Math.max(1, Math.hypot(dx, dy));
     e.ang = Math.atan2(dy, dx) + e.aimOff;
-    // auf Brusthöhe zielen
-    e.input.pitch = Math.atan2(40 - EYE, d);
-    if (d > 280) { wx = dx / d; wy = dy / d; }
+    e.input.pitch = Math.atan2((t.g + 45) - (e.g + EYE), d) + e.aimOff * 0.3;
+    if (d > 300) { wx = dx / d; wy = dy / d; }
     else { wx = -dy / d * e.strafe; wy = dx / d * e.strafe; if (Math.random() < 0.02) e.strafe *= -1; }
-    shoot = d < WEAPONS[e.weapon].range * 0.9 && Math.random() < BOT_LEVELS[botLevel].fire;
+    shoot = d < WEAPONS[e.weapon].range * 0.9 && Math.random() < L.fire;
   } else {
-    const g = e.goal || { x: CX, y: CY };
+    const g = e.goal || zoneC;
     const dx = g.x - e.x, dy = g.y - e.y;
     const d = Math.hypot(dx, dy);
     if (d > 8) { wx = dx / d; wy = dy / d; }
     e.ang = Math.atan2(dy, dx);
     e.input.pitch = 0;
-    if (e.goal && e.goal.type === 'chest' && d < CHEST_R) use = true;
+    if (e.goal && e.goal.type === 'chest' && d < CHEST_R - 10) use = true;
   }
-  // Weltrichtung in lokale Richtung (vor/rechts) umrechnen
   const fx = Math.cos(e.ang), fy = Math.sin(e.ang);
   e.input.ang = e.ang;
   e.input.my = wx * fx + wy * fy;
   e.input.mx = -wx * fy + wy * fx;
   e.input.shoot = shoot;
   e.input.use = use;
+  e.input.sprint = e.mode === 'zone';
 }
 
 // ---------- Simulation ----------
@@ -544,30 +628,22 @@ function simulate(dt) {
     if (e.isBot) botThink(e, dt);
     if (e.input.use) { e.input.use = false; openChest(e); }
 
-    // Bewegung: my = vor/zurück, mx = rechts/links, relativ zur Blickrichtung
     let mx = e.input.mx, my = e.input.my;
     const ml = Math.hypot(mx, my);
     if (ml > 1) { mx /= ml; my /= ml; }
     e.ang = e.input.ang;
     const fx = Math.cos(e.ang), fy = Math.sin(e.ang);
-    const rx = -fy, ry = fx;
-    e.x += (fx * my + rx * mx) * SPEED * dt;
-    e.y += (fy * my + ry * mx) * SPEED * dt;
-    resolve(e);
+    const sp = SPEED * (e.input.sprint && my > 0 ? SPRINT : 1) * dt;
+    moveEntity(e, (fx * my - fy * mx) * sp, (fy * my + fx * mx) * sp);
 
     e.cd = Math.max(0, e.cd - dt);
     if (e.input.shoot && e.cd <= 0) fire(e);
 
     pickupCheck(e);
-    if (dist(e.x, e.y, CX, CY) > zoneNow.r) hurt(e, zoneNow.dps * dt, null, 'Zone');
+    if (dist(e.x, e.y, zoneC.x, zoneC.y) > zoneNow.r) hurt(e, zoneNow.dps * dt, null, 'Zone');
   }
 
-  updateBullets(dt);
-
-  if (pickups.some(p => p.dead)) {
-    pickups = pickups.filter(p => !p.dead);
-    pkDirty = true;
-  }
+  if (pkDel.length > 50 || pickups.length > 3000) pickups = pickups.filter(p => !p.dead);
 
   if (ents.size > 1) {
     const alive = [...ents.values()].filter(e => e.alive);
@@ -582,7 +658,8 @@ function simulate(dt) {
 function resetMatch() {
   endT = null;
   matchT = 0;
-  bullets = [];
+  zoneC = { x: rand(MAP * 0.3, MAP * 0.7), y: rand(MAP * 0.3, MAP * 0.7) };
+  zoneNow = zoneAt(0);
   events.push({ t: 'start' });
   for (const e of [...ents.values()]) {
     if (e.isBot) ents.delete(e.id);
@@ -590,7 +667,6 @@ function resetMatch() {
   }
   genPickups();
   fillBots();
-  zoneNow = zoneAt(0);
 }
 
 // ---------- Snapshots ----------
@@ -608,58 +684,75 @@ function snapshot() {
   }
   const msg = {
     t: 's', tm: +matchT.toFixed(1),
-    z: { x: CX, y: CY, r: Math.round(zoneNow.r), st: zoneNow.st, tm: +zoneNow.tm.toFixed(1), ph: zoneNow.ph },
+    z: { x: Math.round(zoneC.x), y: Math.round(zoneC.y), r: Math.round(zoneNow.r), st: zoneNow.st, tm: +zoneNow.tm.toFixed(1), ph: zoneNow.ph, n: ZONE_PHASES.length },
     al: ps.filter(p => p.al).length,
     ps, ev: events,
   };
-  if (pkDirty) { msg.pk = pkList(); pkDirty = false; }
+  if (pkReset) {
+    msg.pk = pickups.filter(p => !p.dead).map(pkJson);
+    pkReset = false;
+  } else {
+    if (pkAdd.length) msg.pa = pkAdd.filter(p => !p.dead).map(pkJson);
+    if (pkDel.length) msg.pr = pkDel;
+  }
+  pkAdd = []; pkDel = [];
   events = [];
   return JSON.stringify(msg);
 }
 
+// Welt einmal serialisieren (für jeden Spieler gleich)
+const WORLD_JSON = JSON.stringify({
+  map: MAP, grid: world.GRID, seed: SEED,
+  hm: Buffer.from(world.heights.buffer, world.heights.byteOffset, world.heights.byteLength).toString('base64'),
+  pois: world.pois.map(p => ({ n: p.name, k: p.kind, x: p.x, y: p.y, r: p.r, g: p.g })),
+  roads: world.roads.map(r => ({ t: r.type, w: r.w, p: r.pts })),
+  buildings: world.buildings.map(b => ({
+    t: b.type, x0: b.x0, x1: b.x1, y0: b.y0, y1: b.y1, g: b.g, wh: b.wh, d: b.door,
+    rf: b.roof, m: b.mat, rm: b.roofMat, rg: b.ridge, w: b.walls,
+  })),
+  trees: world.trees, rocks: world.rocks,
+});
+
 // ---------- HTTP + WebSocket ----------
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css',
+               '.jpg': 'image/jpeg', '.png': 'image/png', '.md': 'text/plain; charset=utf-8' };
 const PUBLIC = path.join(__dirname, 'public');
+const THREE_DIR = path.join(__dirname, 'node_modules', 'three');
 
 function lanUrls() {
   const out = [];
   for (const list of Object.values(os.networkInterfaces())) {
-    for (const i of list || []) {
-      if (i.family === 'IPv4' && !i.internal) out.push(`http://${i.address}:${PORT}`);
-    }
+    for (const i of list || []) if (i.family === 'IPv4' && !i.internal) out.push(`http://${i.address}:${PORT}`);
   }
   return out;
 }
 
-const server = http.createServer((req, res) => {
-  const urlPath0 = (req.url || '/').split('?')[0];
-  if (urlPath0 === '/vendor/three.module.js') {
-    return fs.readFile(path.join(__dirname, 'node_modules/three/build/three.module.js'), (err, data) => {
-      if (err) { res.writeHead(404); return res.end(); }
-      res.writeHead(200, { 'Content-Type': 'application/javascript' });
-      res.end(data);
-    });
-  }
-  if (urlPath0 === '/api/info') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ urls: lanUrls() }));
-  }
-  let urlPath = decodeURIComponent(urlPath0);
-  if (urlPath === '/') urlPath = '/index.html';
-  const file = path.normalize(path.join(PUBLIC, urlPath));
-  if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
+function serveFile(res, file) {
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404); return res.end('nicht gefunden'); }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
     res.end(data);
   });
+}
+
+const server = http.createServer((req, res) => {
+  const urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+  if (urlPath === '/vendor/three.module.js') return serveFile(res, path.join(THREE_DIR, 'build', 'three.module.js'));
+  if (urlPath.startsWith('/vendor/addons/')) {
+    const file = path.normalize(path.join(THREE_DIR, 'examples', 'jsm', urlPath.slice('/vendor/addons/'.length)));
+    if (!file.startsWith(path.join(THREE_DIR, 'examples', 'jsm'))) { res.writeHead(403); return res.end(); }
+    return serveFile(res, file);
+  }
+  if (urlPath === '/api/info') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ urls: lanUrls() }));
+  }
+  const file = path.normalize(path.join(PUBLIC, urlPath === '/' ? '/index.html' : urlPath));
+  if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
+  serveFile(res, file);
 });
 
 const wss = new WebSocketServer({ server });
-
-function send(ws, obj) {
-  if (ws.readyState === 1) ws.send(JSON.stringify(obj));
-}
 
 wss.on('connection', ws => {
   ws.on('message', raw => {
@@ -675,11 +768,8 @@ wss.on('connection', ws => {
       e.ws = ws;
       ws.entity = e;
       while (ents.size > MAX_TOTAL && [...ents.values()].some(x => x.isBot)) removeOneBot();
-      send(ws, {
-        t: 'welcome', id: e.id, map: MAP, cx: CX, cy: CY,
-        so: solids, pois: POIS.map(p => ({ n: p.name, x: p.x, y: p.y, r: p.r })),
-        pk: pkList(),
-      });
+      const pk = JSON.stringify(pickups.filter(p => !p.dead).map(pkJson));
+      if (ws.readyState === 1) ws.send(`{"t":"welcome","id":${e.id},"world":${WORLD_JSON},"pk":${pk}}`);
       return;
     }
 
@@ -689,34 +779,29 @@ wss.on('connection', ws => {
       inp.mx = clamp(Number(m.mx) || 0, -1, 1);
       inp.my = clamp(Number(m.my) || 0, -1, 1);
       inp.ang = Number(m.a) || 0;
-      inp.pitch = clamp(Number(m.pt) || 0, -1.4, 1.4);
+      inp.pitch = clamp(Number(m.pt) || 0, -1.45, 1.45);
       inp.shoot = !!m.s;
+      inp.sprint = !!m.sp;
     } else if (m.t === 'use') {
       inp.use = true;
     }
   });
-
-  ws.on('close', () => {
-    if (ws.entity) ents.delete(ws.entity.id);
-  });
+  ws.on('close', () => { if (ws.entity) ents.delete(ws.entity.id); });
 });
 
 function broadcast(str) {
   for (const c of wss.clients) if (c.readyState === 1) c.send(str);
 }
 
-// ---------- Game loop ----------
 function tick() {
   const now = Date.now();
   const dt = Math.min(0.05, (now - lastTick) / 1000);
   lastTick = now;
-
   if (endT !== null) {
     if (now >= endT) resetMatch();
   } else {
     simulate(dt);
   }
-
   snapAcc += dt;
   if (snapAcc >= 1 / SNAP_HZ) {
     snapAcc = 0;
@@ -724,7 +809,11 @@ function tick() {
   }
 }
 
-genWorld();
+// Für Tests: beim Import (require) nicht starten, nur die Funktionen bereitstellen
+module.exports = { world, solids, raycast, raycastWorld, blockedAt, groundAt, WEAPONS };
+if (require.main === module) start();
+
+function start() {
 resetMatch();
 setInterval(tick, 1000 / TICK_HZ);
 
@@ -740,20 +829,19 @@ process.on('SIGINT', () => process.exit(0));
 process.on('SIGTERM', () => process.exit(0));
 
 server.on('error', err => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} ist schon belegt – läuft der Server bereits?`);
-  } else {
-    console.error(err);
-  }
+  if (err.code === 'EADDRINUSE') console.error(`Port ${PORT} ist schon belegt – läuft der Server bereits?`);
+  else console.error(err);
   process.exit(1);
 });
 
 server.listen(PORT, () => {
   fs.writeFileSync(PID_FILE, String(process.pid));
   console.log(`Storm Royale läuft auf http://localhost:${PORT}`);
+  console.log(`Welt: ${world.pois.length} Orte, ${world.buildings.length} Gebäude, ${world.trees.length} Bäume, Seed ${SEED}`);
   const lan = lanUrls();
   if (lan.length) {
     console.log('Einladen (gleiches Netzwerk):');
     for (const u of lan) console.log('  ' + u);
   }
 });
+}
