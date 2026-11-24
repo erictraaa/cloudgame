@@ -1,0 +1,14 @@
+{
+  "name": "storm-royale",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Top-down Battle Royale mit Multiplayer und Bots",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "three": "^0.160.0",
+    "ws": "^8.18.0"
+  }
+}
