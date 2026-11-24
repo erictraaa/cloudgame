@@ -9,6 +9,17 @@ npm start
 ```
 Dann `http://localhost:3000` öffnen. Im Menü steht eine Einladungs-Adresse für Freunde im gleichen WLAN (mit Kopieren-Knopf).
 
+## Aktualisieren
+Stoppt den laufenden Server, holt die neueste Version von GitHub (falls vorhanden) und startet den Server im Hintergrund neu:
+
+- **Linux/macOS:** `./update.sh` (oder `npm run update`)
+- **Windows:** Doppelklick auf `update.bat`
+
+Voraussetzung: Das Spiel wurde mit `git clone` installiert (nicht als ZIP). Die Ausgabe des Servers landet in `server.log`.
+Schlägt das Update fehl (z. B. wegen lokaler Änderungen), startet die bisherige Version wieder.
+
+Server ohne Update stoppen: `kill $(cat .server.pid)` (Linux/macOS) bzw. `Stop-Process -Id (Get-Content .server.pid)` (Windows).
+
 ## Steuerung
 - **WASD** bewegen, **Maus** umsehen (Klick aufs Spiel fängt die Maus ein, **Esc** gibt sie frei)
 - **Linksklick** oder **Leertaste** schießen, **E** Truhe öffnen

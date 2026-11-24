@@ -5,7 +5,8 @@
   "description": "Top-down Battle Royale mit Multiplayer und Bots",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "update": "bash update.sh"
   },
   "dependencies": {
     "three": "^0.160.0",

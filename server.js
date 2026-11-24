@@ -728,7 +728,28 @@ genWorld();
 resetMatch();
 setInterval(tick, 1000 / TICK_HZ);
 
+// PID-Datei: damit update.sh / update.ps1 den laufenden Server finden und stoppen können
+const PID_FILE = path.join(__dirname, '.server.pid');
+function removePidFile() {
+  try {
+    if (fs.readFileSync(PID_FILE, 'utf8').trim() === String(process.pid)) fs.unlinkSync(PID_FILE);
+  } catch { /* Datei existiert nicht – egal */ }
+}
+process.on('exit', removePidFile);
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+
+server.on('error', err => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} ist schon belegt – läuft der Server bereits?`);
+  } else {
+    console.error(err);
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
+  fs.writeFileSync(PID_FILE, String(process.pid));
   console.log(`Storm Royale läuft auf http://localhost:${PORT}`);
   const lan = lanUrls();
   if (lan.length) {
