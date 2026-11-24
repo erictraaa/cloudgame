@@ -38,12 +38,12 @@ const SUN_DIR = new THREE.Vector3(0.45, 0.8, 0.35).normalize();
 // Waffe in der Hand (vor der Kamera, in Welt-Einheiten: 72 Einheiten ≈ 1,8 m)
 const viewGun = new THREE.Group();
 const vgMat = new THREE.MeshLambertMaterial({ color: 0x3a3f45 });
-const vgBody = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.5, 9).translate(0, 0, -4.5), vgMat);
-const vgGrip = new THREE.Mesh(new THREE.BoxGeometry(0.9, 2.2, 1.1), vgMat);
-vgGrip.position.set(0, -1.6, -1);
+const vgBody = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.55, 4.2).translate(0, 0, -2.1), vgMat);
+const vgGrip = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.9, 0.45), vgMat);
+vgGrip.position.set(0, -0.6, -0.4);
 viewGun.add(vgBody, vgGrip);
-const MUZZLE = new THREE.Vector3(0, 0.3, -10);
-viewGun.position.set(3.4, -3.6, -6);
+const MUZZLE = new THREE.Vector3(0, 0.1, -4.6);
+viewGun.position.set(1.9, -1.8, -5);
 camera.add(viewGun);
 
 function resize() {
@@ -959,11 +959,11 @@ function frame(now) {
   hitTimer = Math.max(0, hitTimer - dt);
   if (hitTimer <= 0) $('hitm').style.opacity = 0;
   recoil = Math.max(0, recoil - dt * 6);
-  viewGun.position.z = -6 + recoil * 1.2;
+  viewGun.position.z = -5 + recoil * 0.5;
   viewGun.rotation.x = recoil * 0.12;
   // leichtes Wippen beim Laufen
   const moving = keys.has('KeyW') || keys.has('KeyA') || keys.has('KeyS') || keys.has('KeyD');
-  viewGun.position.y = -3.6 + (moving ? Math.sin(t * 10) * 0.25 : 0);
+  viewGun.position.y = -1.8 + (moving ? Math.sin(t * 10) * 0.1 : 0);
 
   if (me && worldBuilt) {
     const g = heightAt(me.x, me.y);
